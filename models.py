@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 
@@ -6,26 +6,34 @@ Base = declarative_base()
 
 
 class Character(Base):
-    """Модель персонажа Star Wars для базы данных"""
+    """Модель персонажа Star Wars с ВСЕМИ обязательными полями"""
     __tablename__ = 'characters'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    character_id = Column(Integer, unique=True, nullable=False, index=True)  # uid из API
+    character_id = Column(Integer, unique=True, nullable=False, index=True)
+    
+    # Основные поля из задания
     name = Column(String(200), nullable=False)
     birth_year = Column(String(50))
     eye_color = Column(String(50))
     gender = Column(String(50))
     hair_color = Column(String(50))
-    homeworld = Column(String(500))
-    mass = Column(Float)  # вес в кг
+    homeworld = Column(String(200))  # НАЗВАНИЕ планеты, не URL!
+    mass = Column(Float)
     skin_color = Column(String(50))
-    height = Column(Float)  # рост в см
+    height = Column(Float)
+    
+    # Дополнительные поля (связанные списки)
+    films = Column(Text)  # список фильмов через запятую
+    species = Column(Text)  # список видов через запятую
+    starships = Column(Text)  # список кораблей через запятую
+    vehicles = Column(Text)  # список транспорта через запятую
+    
+    # Метаданные
     created_at = Column(DateTime, default=datetime.utcnow)
-    api_created = Column(String(100))
-    api_edited = Column(String(100))
+    url = Column(String(500))
 
     def to_dict(self):
-        """Преобразует объект в словарь"""
         return {
             'id': self.id,
             'character_id': self.character_id,
@@ -38,5 +46,8 @@ class Character(Base):
             'mass': self.mass,
             'skin_color': self.skin_color,
             'height': self.height,
-            'created_at': self.created_at.isoformat() if self.created_at else None
+            'films': self.films,
+            'species': self.species,
+            'starships': self.starships,
+            'vehicles': self.vehicles
         }
