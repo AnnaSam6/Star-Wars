@@ -1,9 +1,9 @@
+#!/usr/bin/env python3
 import asyncio
 import aiohttp
 from typing import Dict, Any, List
 import logging
 from database import Database
-from models import Base
 
 logging.basicConfig(
     level=logging.INFO,
@@ -13,14 +13,15 @@ logger = logging.getLogger(__name__)
 
 
 class StarWarsLoader:
-    """Полностью переработанный загрузчик с обогащением данных"""
-    
     BASE_URL = "https://www.swapi.tech/api"
     
     def __init__(self, max_concurrent=10):
         self.max_concurrent = max_concurrent
         self.session = None
-        self.cache = {}  # Кэш для уже загруженных сущностей
+        self.planet_cache = {}  # Кэш для планет
+        self.film_cache = {}    # Кэш для фильмов
+        self.species_cache = {} # Кэш для видов
+        self.ship_cache = {}    # Кэш для кораблей
 
     async def __aenter__(self):
         timeout = aiohttp.ClientTimeout(total=30)
@@ -30,174 +31,209 @@ class StarWarsLoader:
     async def __aexit__(self, *args):
         await self.session.close()
 
-    async def fetch_with_retry(self, url: str, retries=3) -> Dict:
+    async def fetch(self, url: str, retries=3) -> Dict:
         """Запрос с повторными попытками"""
         for attempt in range(retries):
             try:
-                async with self.session.get(url) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    else:
-                        logger.warning(f"HTTP {response.status} for {url}")
+                async with self.session.get(url) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    logger.warning(f"HTTP {resp.status} for {url}")
             except asyncio.TimeoutError:
-                logger.warning(f"Timeout on attempt {attempt + 1} for {url}")
+                logger.warning(f"Timeout {url}, attempt {attempt+1}")
             except Exception as e:
-                logger.warning(f"Error on attempt {attempt + 1}: {e}")
+                logger.warning(f"Error {url}: {e}, attempt {attempt+1}")
             
             if attempt < retries - 1:
-                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                await asyncio.sleep(1 * (attempt + 1))
         return None
 
     async def get_planet_name(self, planet_url: str) -> str:
-        """Получение НАЗВАНИЯ планеты по URL (а не сохранение URL)"""
+        """Получаем НАЗВАНИЕ планеты (не URL!)"""
         if not planet_url:
             return "unknown"
         
-        if planet_url in self.cache:
-            return self.cache[planet_url]
+        if planet_url in self.planet_cache:
+            return self.planet_cache[planet_url]
         
-        data = await self.fetch_with_retry(planet_url)
+        data = await self.fetch(planet_url)
         if data and 'result' in data:
             name = data['result']['properties'].get('name', 'unknown')
-            self.cache[planet_url] = name
+            self.planet_cache[planet_url] = name
+            logger.debug(f"🌍 Planet: {name}")
             return name
         return "unknown"
 
-    async def get_names_from_urls(self, urls: List[str], entity_type: str) -> str:
-        """Преобразование списка URL в строку названий через запятую"""
-        if not urls:
+    async def get_film_names(self, film_urls: List[str]) -> str:
+        """Получаем НАЗВАНИЯ фильмов через запятую"""
+        if not film_urls:
             return ""
         
         names = []
-        for url in urls[:5]:  # Ограничиваем для производительности
-            if url in self.cache:
-                names.append(self.cache[url])
+        for url in film_urls:
+            if url in self.film_cache:
+                names.append(self.film_cache[url])
             else:
-                data = await self.fetch_with_retry(url)
+                data = await self.fetch(url)
                 if data and 'result' in data:
-                    name = data['result']['properties'].get('name', '')
-                    if not name:
-                        name = data['result']['properties'].get('title', '')
-                    self.cache[url] = name
+                    title = data['result']['properties'].get('title', 'unknown')
+                    self.film_cache[url] = title
+                    names.append(title)
+                else:
+                    names.append("unknown")
+        result = ", ".join(names)
+        logger.debug(f"🎬 Films: {result}")
+        return result
+
+    async def get_species_names(self, species_urls: List[str]) -> str:
+        """Получаем НАЗВАНИЯ видов через запятую"""
+        if not species_urls:
+            return ""
+        
+        names = []
+        for url in species_urls:
+            if url in self.species_cache:
+                names.append(self.species_cache[url])
+            else:
+                data = await self.fetch(url)
+                if data and 'result' in data:
+                    name = data['result']['properties'].get('name', 'unknown')
+                    self.species_cache[url] = name
                     names.append(name)
                 else:
                     names.append("unknown")
-        
         return ", ".join(names)
 
-    async def enrich_character(self, raw_data: Dict, char_id: int) -> Dict[str, Any]:
-        """Обогащение данных персонажа: загрузка связанных сущностей"""
-        properties = raw_data.get('result', {}).get('properties', {})
+    async def get_ship_names(self, ship_urls: List[str], ship_type: str) -> str:
+        """Получаем НАЗВАНИЯ кораблей/транспорта через запятую"""
+        if not ship_urls:
+            return ""
         
-        # Получаем название планеты (НЕ URL!)
-        homeworld_url = properties.get('homeworld', '')
-        homeworld_name = await self.get_planet_name(homeworld_url)
+        cache = self.ship_cache
+        names = []
+        for url in ship_urls:
+            if url in cache:
+                names.append(cache[url])
+            else:
+                data = await self.fetch(url)
+                if data and 'result' in data:
+                    name = data['result']['properties'].get('name', 'unknown')
+                    cache[url] = name
+                    names.append(name)
+                else:
+                    names.append("unknown")
+        return ", ".join(names)
+
+    async def enrich_character(self, raw_data: Dict, char_id: int) -> Dict:
+        """Обогащаем персонажа - загружаем связанные данные"""
+        props = raw_data.get('result', {}).get('properties', {})
         
-        # Получаем названия связанных сущностей
-        films = await self.get_names_from_urls(properties.get('films', []), 'films')
-        species = await self.get_names_from_urls(properties.get('species', []), 'species')
-        starships = await self.get_names_from_urls(properties.get('starships', []), 'starships')
-        vehicles = await self.get_names_from_urls(properties.get('vehicles', []), 'vehicles')
+        # Ключевой момент: homeworld - НАЗВАНИЕ, а не URL!
+        homeworld_name = await self.get_planet_name(props.get('homeworld', ''))
         
-        # Конвертация массы и роста
-        mass = properties.get('mass', '')
-        mass_float = None
-        if mass and mass != 'unknown':
+        # Преобразуем списки URL в строки с названиями
+        films_str = await self.get_film_names(props.get('films', []))
+        species_str = await self.get_species_names(props.get('species', []))
+        starships_str = await self.get_ship_names(props.get('starships', []), 'starship')
+        vehicles_str = await self.get_ship_names(props.get('vehicles', []), 'vehicle')
+        
+        # Конвертация массы
+        mass_raw = props.get('mass', '')
+        mass_val = None
+        if mass_raw and mass_raw != 'unknown':
             try:
-                mass_float = float(mass)
+                mass_val = float(mass_raw)
             except ValueError:
                 pass
         
-        height = properties.get('height', '')
-        height_float = None
-        if height and height != 'unknown':
+        # Конвертация роста
+        height_raw = props.get('height', '')
+        height_val = None
+        if height_raw and height_raw != 'unknown':
             try:
-                height_float = float(height)
+                height_val = float(height_raw)
             except ValueError:
                 pass
         
         return {
             'character_id': char_id,
-            'name': properties.get('name', 'Unknown'),
-            'birth_year': properties.get('birth_year', ''),
-            'eye_color': properties.get('eye_color', ''),
-            'gender': properties.get('gender', ''),
-            'hair_color': properties.get('hair_color', ''),
-            'homeworld': homeworld_name,  # Здесь НАЗВАНИЕ, а не URL!
-            'mass': mass_float,
-            'skin_color': properties.get('skin_color', ''),
-            'height': height_float,
-            'films': films,
-            'species': species,
-            'starships': starships,
-            'vehicles': vehicles,
-            'url': properties.get('url', '')
+            'name': props.get('name', 'Unknown'),
+            'birth_year': props.get('birth_year', ''),
+            'eye_color': props.get('eye_color', ''),
+            'gender': props.get('gender', ''),
+            'hair_color': props.get('hair_color', ''),
+            'homeworld': homeworld_name,  # ✅ Название, не URL!
+            'mass': mass_val,
+            'skin_color': props.get('skin_color', ''),
+            'height': height_val,
+            'films': films_str,           # ✅ Строка с названиями
+            'species': species_str,       # ✅ Строка с названиями
+            'starships': starships_str,   # ✅ Строка с названиями
+            'vehicles': vehicles_str,     # ✅ Строка с названиями
+            'api_url': props.get('url', '')
         }
 
     async def get_total_count(self) -> int:
-        """Получение общего количества персонажей"""
-        data = await self.fetch_with_retry(f"{self.BASE_URL}/people")
+        data = await self.fetch(f"{self.BASE_URL}/people")
         if data:
-            return data.get('total_records', 0)
-        return 0
+            return data.get('total_records', 83)
+        return 83
 
-    async def fetch_character(self, char_id: int) -> Dict:
-        """Загрузка одного персонажа"""
-        url = f"{self.BASE_URL}/people/{char_id}"
-        return await self.fetch_with_retry(url)
-
-    async def load_all_characters(self) -> List[Dict]:
-        """Асинхронная загрузка ВСЕХ персонажей"""
+    async def load_all(self) -> List[Dict]:
+        """Загрузка всех персонажей"""
         total = await self.get_total_count()
         logger.info(f"📊 Total characters to fetch: {total}")
         
-        if total == 0:
-            total = 83  # Примерное количество
-        
         semaphore = asyncio.Semaphore(self.max_concurrent)
         
-        async def fetch_one(char_id: int):
+        async def load_one(char_id: int):
             async with semaphore:
-                logger.info(f"🔄 Fetching character {char_id}...")
-                data = await self.fetch_character(char_id)
+                logger.info(f"🔄 Fetching character {char_id}/{total}")
+                data = await self.fetch(f"{self.BASE_URL}/people/{char_id}")
                 if data:
-                    enriched = await self.enrich_character(data, char_id)
-                    return enriched
+                    return await self.enrich_character(data, char_id)
                 return None
         
-        tasks = [fetch_one(i) for i in range(1, total + 1)]
+        tasks = [load_one(i) for i in range(1, total + 1)]
         results = await asyncio.gather(*tasks)
         
         characters = [c for c in results if c is not None]
-        logger.info(f"✅ Fetched {len(characters)} characters successfully")
+        logger.info(f"✅ Fetched {len(characters)} characters")
         return characters
 
 
 async def main():
-    logger.info("🚀 Starting Star Wars data loader...")
+    logger.info("🚀 Star Wars Data Loader Started")
     
     db = Database()
     
     try:
         async with StarWarsLoader(max_concurrent=10) as loader:
-            characters = await loader.load_all_characters()
+            characters = await loader.load_all()
             
             saved = 0
             for char in characters:
-                success = await db.save_character(char)
-                if success:
+                if await db.save_character(char):
                     saved += 1
             
             await db.get_stats()
-            logger.info(f"✨ Done! Saved {saved} new characters")
+            logger.info(f"✨ Saved {saved} new characters")
             
-            # Вывод примера
-            if characters:
-                sample = characters[0]
-                logger.info(f"\n📝 Example of enriched data:")
-                logger.info(f"   Name: {sample['name']}")
-                logger.info(f"   Homeworld: {sample['homeworld']}")  # Должно быть название, а не URL
-                logger.info(f"   Films: {sample['films']}")
+            # ПРОВЕРКА: выводим первые 3 записи
+            logger.info("\n" + "="*60)
+            logger.info("📝 SAMPLE OF SAVED DATA:")
+            logger.info("="*60)
+            
+            all_chars = await db.get_all()
+            for i, row in enumerate(all_chars[:3]):
+                logger.info(f"\n--- Character {i+1} ---")
+                logger.info(f"  ID: {row[1]}")
+                logger.info(f"  Name: {row[2]}")
+                logger.info(f"  Homeworld: {row[7]}")  # Должно быть название!
+                logger.info(f"  Films: {row[11]}")      # Должны быть названия!
+                logger.info(f"  Species: {row[12]}")
+                logger.info(f"  Starships: {row[13]}")
+                logger.info(f"  Vehicles: {row[14]}")
                 
     finally:
         await db.close()
